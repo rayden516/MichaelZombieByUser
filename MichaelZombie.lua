@@ -3,8 +3,12 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 
 local cfg = {
-    ZombieESP = { Visible = false },
-    HitboxExpander = { Enabled = false, Size = 10 },
+    ZombieESP     = { Visible = false },
+    MysteryBoxESP = { Visible = false },
+    WallBuyESP    = { Visible = false },
+    PerkESP       = { Visible = false },
+    NoCollide     = { Enabled = false },
+    HitboxExpander = { Enabled = false, Size = 6 },
     Zombie = {
         ShowBox    = true,
         ShowLine   = true,
@@ -14,23 +18,54 @@ local cfg = {
         LineColor  = Color3.new(1, 0.5, 0),
         TextColor  = Color3.new(0, 1, 0),
     },
+    MysteryBox = {
+        ShowBox   = true,
+        ShowLine  = true,
+        ShowName  = true,
+        BoxColor  = Color3.new(1, 0, 1),
+        LineColor = Color3.new(1, 1, 0),
+        TextColor = Color3.new(1, 0, 1),
+    },
+    WallBuy = {
+        BoxColor  = Color3.fromRGB(100, 160, 220),
+        TextColor = Color3.fromRGB(150, 195, 240),
+    },
+    Perk = {
+        BoxColor  = Color3.fromRGB(200, 130, 255),
+        TextColor = Color3.fromRGB(220, 170, 255),
+    },
 }
 
 local espPool    = {}
-local activeKeys = { zombie = {} }
-local zombieData = {}
-local frameCount = 0
-local hitboxStore = {}
+local activeKeys = { zombie = {}, mysteryBox = {}, wallBuy = {}, perk = {} }
+local zombieData     = {}
+local mysteryBoxData = {}
+local wallBuyData    = {}
+local perkData       = {}
+local hitboxStore    = {}
+
+local hasWorldToScreen    = type(WorldToScreen) == "function"
+local cachedCam           = workspace.CurrentCamera
+local cachedScreenCenterX = 960
+local cachedScreenBottomY = 1080
+
+local function updateViewportCache()
+    cachedCam = workspace.CurrentCamera
+    local vs = cachedCam and cachedCam.ViewportSize or Vector2.new(1920, 1080)
+    cachedScreenCenterX = vs.X / 2
+    cachedScreenBottomY = vs.Y
+end
+
+updateViewportCache()
 
 local function toScreen(pos)
     if not pos then return nil, false end
-    if type(WorldToScreen) == "function" then
+    if hasWorldToScreen then
         local ok, scr, on = pcall(WorldToScreen, pos)
         if ok and scr then return scr, on end
     end
-    local cam = workspace.CurrentCamera
-    if cam then
-        local ok, v, vis = pcall(function() return cam:WorldToViewportPoint(pos) end)
+    if cachedCam then
+        local ok, v, vis = pcall(cachedCam.WorldToViewportPoint, cachedCam, pos)
         if ok and v then return Vector2.new(v.X, v.Y), vis end
     end
     return nil, false
@@ -143,9 +178,17 @@ local function applyHitbox(model)
     if hitboxStore[head] then return end
     local ok, origSize = pcall(function() return head.Size end)
     if not ok then return end
-    hitboxStore[head] = origSize
+    local ok2, origCollide = pcall(function() return head.CanCollide end)
+    local ok3, origTransparency = pcall(function() return head.Transparency end)
+    hitboxStore[head] = {
+        size         = origSize,
+        collide      = ok2 and origCollide or true,
+        transparency = ok3 and origTransparency or 0,
+    }
     local s = cfg.HitboxExpander.Size
     pcall(function() head.Size = Vector3.new(s, s, s) end)
+    pcall(function() head.CanCollide = false end)
+    pcall(function() head.Transparency = 1 end)
 end
 
 local function restoreHitbox(model)
@@ -154,7 +197,11 @@ local function restoreHitbox(model)
     if not head then return end
     local orig = hitboxStore[head]
     if orig then
-        if head.Parent then pcall(function() head.Size = orig end) end
+        if head.Parent then
+            pcall(function() head.Size = orig.size end)
+            pcall(function() head.CanCollide = orig.collide end)
+            pcall(function() head.Transparency = orig.transparency end)
+        end
         hitboxStore[head] = nil
     end
 end
@@ -168,9 +215,11 @@ local function cleanHitboxStore()
 end
 
 local function restoreAllHitboxes()
-    for part, origSize in pairs(hitboxStore) do
+    for part, orig in pairs(hitboxStore) do
         if part and part.Parent then
-            pcall(function() part.Size = origSize end)
+            pcall(function() part.Size = orig.size end)
+            pcall(function() part.CanCollide = orig.collide end)
+            pcall(function() part.Transparency = orig.transparency end)
         end
     end
     hitboxStore = {}
@@ -180,6 +229,30 @@ local function applyAllHitboxes()
     for _, data in pairs(zombieData) do
         if data.model and data.model.Parent then
             applyHitbox(data.model)
+        end
+    end
+end
+
+local function applyZombieNoCollide()
+    for _, data in pairs(zombieData) do
+        if data.model and data.model.Parent then
+            for _, part in ipairs(data.model:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "Head" then
+                    pcall(function() part.CanCollide = false end)
+                end
+            end
+        end
+    end
+end
+
+local function restoreZombieCollide()
+    for _, data in pairs(zombieData) do
+        if data.model and data.model.Parent then
+            for _, part in ipairs(data.model:GetDescendants()) do
+                if part:IsA("BasePart") and part.Name ~= "Head" then
+                    pcall(function() part.CanCollide = true end)
+                end
+            end
         end
     end
 end
@@ -205,16 +278,13 @@ end
 local function scanZombies()
     local ignore = workspace:FindFirstChild("Ignore")
     local zombieFolder = ignore and ignore:FindFirstChild("Zombies")
-
     cleanHitboxStore()
-
     if not zombieFolder then
         local dead = {}
         for key in pairs(zombieData) do dead[#dead + 1] = key end
         for _, key in ipairs(dead) do clearZombieKey(key) end
         return
     end
-
     local found = {}
     for _, zombie in ipairs(zombieFolder:GetChildren()) do
         if zombie and zombie:IsA("Model") then
@@ -222,17 +292,32 @@ local function scanZombies()
             if root then
                 found[zombie] = true
                 if not zombieData[zombie] then
-                    zombieData[zombie] = { model = zombie, root = root, sizeCache = nil }
-                    if cfg.HitboxExpander.Enabled then
-                        applyHitbox(zombie)
+                    zombieData[zombie] = {
+                        model     = zombie,
+                        root      = root,
+                        sizeCache = nil,
+                        hum       = getHumanoid(zombie),
+                        lastDist  = nil,
+                        lastHp    = nil,
+                        lastMaxHp = nil,
+                    }
+                    if cfg.HitboxExpander.Enabled then applyHitbox(zombie) end
+                    if cfg.NoCollide.Enabled then
+                        for _, part in ipairs(zombie:GetDescendants()) do
+                            if part:IsA("BasePart") and part.Name ~= "Head" then
+                                pcall(function() part.CanCollide = false end)
+                            end
+                        end
                     end
                 else
                     zombieData[zombie].root = root
+                    if not zombieData[zombie].hum or not zombieData[zombie].hum.Parent then
+                        zombieData[zombie].hum = getHumanoid(zombie)
+                    end
                 end
             end
         end
     end
-
     local dead = {}
     for key in pairs(zombieData) do
         if not found[key] or not key.Parent then
@@ -248,216 +333,558 @@ local function updateZombieEsp(playerPos)
         activeKeys.zombie = {}
         return
     end
-
     local seen = {}
     local zc   = cfg.Zombie
-    local cam  = workspace.CurrentCamera
-    local viewSize = cam and cam.ViewportSize or Vector2.new(1920, 1080)
-    local screenCenterX = viewSize.X / 2
-    local screenBottomY = viewSize.Y
-
     for key, data in pairs(zombieData) do
         local model = data.model
         local root  = data.root
-
         if not model or not model.Parent then
-            hideEntry(espPool[key]); continue
-        end
-
-        if not root or not root.Parent then
-            root = getRootPart(model)
-            if not root then hideEntry(espPool[key]); continue end
-            data.root = root
-        end
-
-        local ok, pos = pcall(function() return root.Position end)
-        if not ok or not pos then hideEntry(espPool[key]); continue end
-
-        local scr, onScr = toScreen(pos)
-        if not scr or not onScr then hideEntry(espPool[key]); continue end
-
-        seen[key]              = true
-        activeKeys.zombie[key] = true
-        local entry = getPoolEntry(key)
-
-        local dist  = (playerPos - pos).Magnitude
-        local hum   = getHumanoid(model)
-        local hp    = hum and hum.Health    or 0
-        local maxHp = hum and hum.MaxHealth or 100
-
-        if zc.ShowBox then
-            if not data.sizeCache then
-                local ok2, sz = pcall(function() return root.Size end)
-                data.sizeCache = ok2 and sz or Vector3.new(4, 5, 4)
+            hideEntry(espPool[key])
+        else
+            if not root or not root.Parent then
+                root = getRootPart(model)
+                data.root = root
             end
-            local scale = math.clamp(1000 / math.max(dist, 1), 0.3, 8)
-            local boxH  = math.floor(data.sizeCache.Y * 11 * scale / 10)
-            local boxW  = math.floor(data.sizeCache.X * 5  * scale / 10)
-            boxH = math.max(boxH, 20)
-            boxW = math.max(boxW, 10)
-            entry.box.Size     = Vector2.new(boxW, boxH)
-            entry.box.Position = Vector2.new(scr.X - boxW / 2, scr.Y - boxH / 2)
-            entry.box.Color    = zc.BoxColor
-            entry.box.Visible  = true
-        else
-            entry.box.Visible = false
-        end
-
-        if zc.ShowName then
-            entry.label.Text     = string.format("%s [%dm]", model.Name, math.floor(dist))
-            entry.label.Position = Vector2.new(scr.X, scr.Y - 40)
-            entry.label.Color    = zc.TextColor
-            entry.label.Visible  = true
-        else
-            entry.label.Visible = false
-        end
-
-        if zc.ShowHealth and hum then
-            local hpPct  = math.clamp(hp / math.max(maxHp, 1), 0, 1)
-            entry.healthLabel.Text     = string.format("HP: %d/%d", math.floor(hp), math.floor(maxHp))
-            entry.healthLabel.Position = Vector2.new(scr.X, scr.Y - 27)
-            entry.healthLabel.Color    = Color3.new(1 - hpPct, hpPct, 0)
-            entry.healthLabel.Visible  = true
-        else
-            entry.healthLabel.Visible = false
-        end
-
-        if zc.ShowLine then
-            entry.line.From    = Vector2.new(screenCenterX, screenBottomY)
-            entry.line.To      = Vector2.new(scr.X, scr.Y)
-            entry.line.Color   = zc.LineColor
-            entry.line.Visible = true
-        else
-            entry.line.Visible = false
+            if not root then
+                hideEntry(espPool[key])
+            else
+                local pos = root.Position
+                local scr, onScr = toScreen(pos)
+                if not scr or not onScr then
+                    hideEntry(espPool[key])
+                else
+                    seen[key]              = true
+                    activeKeys.zombie[key] = true
+                    local entry = getPoolEntry(key)
+                    local scrX, scrY = scr.X, scr.Y
+                    local dist = (playerPos - pos).Magnitude
+                    local hum  = data.hum
+                    if not hum or not hum.Parent then
+                        hum = getHumanoid(model)
+                        data.hum = hum
+                    end
+                    local hp    = hum and hum.Health    or 0
+                    local maxHp = hum and hum.MaxHealth or 100
+                    if zc.ShowBox then
+                        if not data.sizeCache then
+                            local ok2, sz = pcall(function() return root.Size end)
+                            data.sizeCache = ok2 and sz or Vector3.new(4, 5, 4)
+                        end
+                        local scale = math.clamp(1000 / math.max(dist, 1), 0.3, 8)
+                        local boxH  = math.floor(data.sizeCache.Y * 11 * scale / 10)
+                        local boxW  = math.floor(data.sizeCache.X * 5  * scale / 10)
+                        boxH = math.max(boxH, 20)
+                        boxW = math.max(boxW, 10)
+                        entry.box.Size     = Vector2.new(boxW, boxH)
+                        entry.box.Position = Vector2.new(scrX - boxW / 2, scrY - boxH / 2)
+                        entry.box.Color    = zc.BoxColor
+                        entry.box.Visible  = true
+                    else
+                        entry.box.Visible = false
+                    end
+                    if zc.ShowName then
+                        local floorDist = math.floor(dist)
+                        if floorDist ~= data.lastDist then
+                            data.lastDist = floorDist
+                            entry.label.Text = string.format("%s [%dm]", model.Name, floorDist)
+                        end
+                        entry.label.Position = Vector2.new(scrX, scrY - 40)
+                        entry.label.Color    = zc.TextColor
+                        entry.label.Visible  = true
+                    else
+                        entry.label.Visible = false
+                    end
+                    if zc.ShowHealth and hum then
+                        local floorHp    = math.floor(hp)
+                        local floorMaxHp = math.floor(maxHp)
+                        if floorHp ~= data.lastHp or floorMaxHp ~= data.lastMaxHp then
+                            data.lastHp    = floorHp
+                            data.lastMaxHp = floorMaxHp
+                            entry.healthLabel.Text = string.format("HP: %d/%d", floorHp, floorMaxHp)
+                        end
+                        local hpPct = math.clamp(hp / math.max(maxHp, 1), 0, 1)
+                        entry.healthLabel.Position = Vector2.new(scrX, scrY - 27)
+                        entry.healthLabel.Color    = Color3.new(1 - hpPct, hpPct, 0)
+                        entry.healthLabel.Visible  = true
+                    else
+                        entry.healthLabel.Visible = false
+                    end
+                    if zc.ShowLine then
+                        entry.line.From    = Vector2.new(cachedScreenCenterX, cachedScreenBottomY)
+                        entry.line.To      = Vector2.new(scrX, scrY)
+                        entry.line.Color   = zc.LineColor
+                        entry.line.Visible = true
+                    else
+                        entry.line.Visible = false
+                    end
+                end
+            end
         end
     end
-
     cleanupBucket(activeKeys.zombie, seen)
 end
 
-local loaderSource = game:HttpGet("https://raw.githubusercontent.com/shystemcito/ForMatcha-Testing/refs/heads/main/Libs/Loader.luau")
-local fn, compErr = loadstring("MatchaLib = (function()\n" .. loaderSource .. "\nend)()")
-if not fn then error("COMPILE ERROR: " .. tostring(compErr)) return end
-fn()
-local UiLib = MatchaLib.load("MatchaUI")
+local function scanMysteryBoxes()
+    local mapComponents = workspace:FindFirstChild("_MapComponents")
+    local mysteryBox = mapComponents and mapComponents:FindFirstChild("MysteryBox")
+    if not mysteryBox or not mysteryBox:IsA("Model") then
+        local dead = {}
+        for key in pairs(mysteryBoxData) do dead[#dead + 1] = key end
+        for _, key in ipairs(dead) do
+            removeEntry(key)
+            activeKeys.mysteryBox[key] = nil
+            mysteryBoxData[key] = nil
+        end
+        return
+    end
+    local found = {}
+    local rootLoc = mysteryBox:FindFirstChild("PurchaseBox")
+        or mysteryBox.PrimaryPart
+        or mysteryBox:FindFirstChildWhichIsA("BasePart")
+    if rootLoc then
+        found[mysteryBox] = true
+        if not mysteryBoxData[mysteryBox] then
+            mysteryBoxData[mysteryBox] = { model = mysteryBox, root = rootLoc, lastDist = nil }
+        else
+            mysteryBoxData[mysteryBox].root = rootLoc
+        end
+    end
+    local dead = {}
+    for key in pairs(mysteryBoxData) do
+        if not found[key] or not key.Parent then dead[#dead + 1] = key end
+    end
+    for _, key in ipairs(dead) do
+        removeEntry(key)
+        activeKeys.mysteryBox[key] = nil
+        mysteryBoxData[key] = nil
+    end
+end
 
-local Window = UiLib.CreateWindow({
-    Title  = "Zombie Tracker",
-    X      = 500,
-    Y      = 100,
-    Width  = 560,
-    Height = 620,
-    ZIndex = 100,
-})
+local function updateMysteryBoxEsp(playerPos)
+    if not cfg.MysteryBoxESP.Visible then
+        for key in pairs(activeKeys.mysteryBox) do hideEntry(espPool[key]) end
+        activeKeys.mysteryBox = {}
+        return
+    end
+    local seen = {}
+    local mc   = cfg.MysteryBox
+    for key, data in pairs(mysteryBoxData) do
+        local model = data.model
+        local root  = data.root
+        if not model or not model.Parent then
+            hideEntry(espPool[key])
+        else
+            if not root or not root.Parent then
+                root = model:FindFirstChild("RootLocation")
+                data.root = root
+            end
+            if not root then
+                hideEntry(espPool[key])
+            else
+                local pos = root.Position
+                local scr, onScr = toScreen(pos)
+                if not scr or not onScr then
+                    hideEntry(espPool[key])
+                else
+                    seen[key]                  = true
+                    activeKeys.mysteryBox[key] = true
+                    local entry = getPoolEntry(key)
+                    local scrX, scrY = scr.X, scr.Y
+                    local dist = (playerPos - pos).Magnitude
+                    if mc.ShowBox then
+                        local scale = math.clamp(1000 / math.max(dist, 1), 0.3, 8)
+                        local boxH  = math.max(math.floor(30 * scale / 10), 20)
+                        local boxW  = math.max(math.floor(20 * scale / 10), 14)
+                        entry.box.Size     = Vector2.new(boxW, boxH)
+                        entry.box.Position = Vector2.new(scrX - boxW / 2, scrY - boxH / 2)
+                        entry.box.Color    = mc.BoxColor
+                        entry.box.Visible  = true
+                    else
+                        entry.box.Visible = false
+                    end
+                    if mc.ShowName then
+                        local floorDist = math.floor(dist)
+                        if floorDist ~= data.lastDist then
+                            data.lastDist = floorDist
+                            entry.label.Text = string.format("Mystery Box [%dm]", floorDist)
+                        end
+                        entry.label.Position = Vector2.new(scrX, scrY - 30)
+                        entry.label.Color    = mc.TextColor
+                        entry.label.Visible  = true
+                    else
+                        entry.label.Visible = false
+                    end
+                    entry.healthLabel.Visible = false
+                    if mc.ShowLine then
+                        entry.line.From    = Vector2.new(cachedScreenCenterX, cachedScreenBottomY)
+                        entry.line.To      = Vector2.new(scrX, scrY)
+                        entry.line.Color   = mc.LineColor
+                        entry.line.Visible = true
+                    else
+                        entry.line.Visible = false
+                    end
+                end
+            end
+        end
+    end
+    cleanupBucket(activeKeys.mysteryBox, seen)
+end
 
-local catESP    = Window.AddCategory("ESP")
-local catHitbox = Window.AddCategory("Hitbox")
-local catDebug  = Window.AddCategory("Debug")
+local function scanWallBuys()
+    local folder = workspace:FindFirstChild("_WallBuys")
+    if not folder then
+        for key in pairs(wallBuyData) do
+            hideEntry(espPool[key])
+            activeKeys.wallBuy[key] = nil
+            wallBuyData[key] = nil
+        end
+        return
+    end
+    local found = {}
+    for _, gun in ipairs(folder:GetChildren()) do
+        if gun and gun:IsA("Model") then
+            local part = gun:FindFirstChild("PurchaseWallGun")
+            if part and part:IsA("BasePart") then
+                found[part] = true
+                if not wallBuyData[part] then
+                    wallBuyData[part] = { name = gun.Name, part = part, lastDist = nil }
+                end
+            end
+        end
+    end
+    for key in pairs(wallBuyData) do
+        if not found[key] or not key.Parent then
+            hideEntry(espPool[key])
+            activeKeys.wallBuy[key] = nil
+            wallBuyData[key] = nil
+        end
+    end
+end
 
-local function buildESPTab()
-    Window.AddSection(catESP, "Zombie ESP")
+local function updateWallBuyEsp(playerPos)
+    if not cfg.WallBuyESP.Visible then
+        for key in pairs(activeKeys.wallBuy) do hideEntry(espPool[key]) end
+        activeKeys.wallBuy = {}
+        return
+    end
+    local seen = {}
+    local wc   = cfg.WallBuy
+    for key, data in pairs(wallBuyData) do
+        local part = data.part
+        if not part or not part.Parent then
+            hideEntry(espPool[key])
+            activeKeys.wallBuy[key] = nil
+            wallBuyData[key] = nil
+        else
+            local pos = part.Position
+            local scr, onScr = toScreen(pos)
+            if not scr or not onScr then
+                hideEntry(espPool[key])
+            else
+                seen[key] = true
+                activeKeys.wallBuy[key] = true
+                local entry = getPoolEntry(key)
+                local scrX, scrY = scr.X, scr.Y
+                local dist  = (playerPos - pos).Magnitude
+                local scale = math.clamp(500 / math.max(dist, 1), 0.2, 4)
+                local boxW  = math.max(math.floor(20 * scale), 10)
+                local boxH  = math.max(math.floor(26 * scale), 12)
+                entry.box.Size     = Vector2.new(boxW, boxH)
+                entry.box.Position = Vector2.new(scrX - boxW / 2, scrY - boxH / 2)
+                entry.box.Color    = wc.BoxColor
+                entry.box.Visible  = true
+                local floorDist = math.floor(dist)
+                if floorDist ~= data.lastDist then
+                    data.lastDist = floorDist
+                    entry.label.Text = string.format("%s [%dm]", data.name, floorDist)
+                end
+                entry.label.Position    = Vector2.new(scrX, scrY - boxH / 2 - 14)
+                entry.label.Color       = wc.TextColor
+                entry.label.Visible     = true
+                entry.healthLabel.Visible = false
+                entry.line.Visible        = false
+            end
+        end
+    end
+    cleanupBucket(activeKeys.wallBuy, seen)
+end
 
-    Window.AddToggle(catESP, "Zombie ESP", cfg.ZombieESP.Visible, function(state)
+local function scanPerkMachines()
+    local folder = workspace:FindFirstChild("_PerkMachines")
+    if not folder then
+        for key in pairs(perkData) do
+            hideEntry(espPool[key])
+            activeKeys.perk[key] = nil
+            perkData[key] = nil
+        end
+        return
+    end
+    local found = {}
+    for _, machine in ipairs(folder:GetChildren()) do
+        if machine and machine:IsA("Model") then
+            local part = machine.PrimaryPart or machine:FindFirstChildWhichIsA("BasePart")
+            if part then
+                found[part] = true
+                if not perkData[part] then
+                    perkData[part] = { name = machine.Name, part = part, lastDist = nil }
+                end
+            end
+        end
+    end
+    for key in pairs(perkData) do
+        if not found[key] or not key.Parent then
+            hideEntry(espPool[key])
+            activeKeys.perk[key] = nil
+            perkData[key] = nil
+        end
+    end
+end
+
+local function updatePerkEsp(playerPos)
+    if not cfg.PerkESP.Visible then
+        for key in pairs(activeKeys.perk) do hideEntry(espPool[key]) end
+        activeKeys.perk = {}
+        return
+    end
+    local seen = {}
+    local pc   = cfg.Perk
+    for key, data in pairs(perkData) do
+        local part = data.part
+        if not part or not part.Parent then
+            hideEntry(espPool[key])
+            activeKeys.perk[key] = nil
+            perkData[key] = nil
+        else
+            local pos = part.Position
+            local scr, onScr = toScreen(pos)
+            if not scr or not onScr then
+                hideEntry(espPool[key])
+            else
+                seen[key] = true
+                activeKeys.perk[key] = true
+                local entry = getPoolEntry(key)
+                local scrX, scrY = scr.X, scr.Y
+                local dist  = (playerPos - pos).Magnitude
+                local scale = math.clamp(500 / math.max(dist, 1), 0.2, 4)
+                local boxW  = math.max(math.floor(28 * scale), 12)
+                local boxH  = math.max(math.floor(36 * scale), 14)
+                entry.box.Size     = Vector2.new(boxW, boxH)
+                entry.box.Position = Vector2.new(scrX - boxW / 2, scrY - boxH / 2)
+                entry.box.Color    = pc.BoxColor
+                entry.box.Visible  = true
+                local floorDist = math.floor(dist)
+                if floorDist ~= data.lastDist then
+                    data.lastDist = floorDist
+                    entry.label.Text = string.format("%s [%dm]", data.name, floorDist)
+                end
+                entry.label.Position    = Vector2.new(scrX, scrY - boxH / 2 - 14)
+                entry.label.Color       = pc.TextColor
+                entry.label.Visible     = true
+                entry.healthLabel.Visible = false
+                entry.line.Visible        = false
+            end
+        end
+    end
+    cleanupBucket(activeKeys.perk, seen)
+end
+
+local function BuildESP(Tab)
+    local zc = cfg.Zombie
+    local S = Tab:Section("ESP", "Left")
+    S:Toggle("ZombieESP", "Zombie ESP", cfg.ZombieESP.Visible, function(state)
         cfg.ZombieESP.Visible = state
-        UiLib.Notify(state and "Zombie ESP ON" or "Zombie ESP OFF", "", 2)
+        notify(state and "Zombie ESP ON" or "Zombie ESP OFF", "", 2)
         if state then
             scanZombies()
         else
             for key in pairs(activeKeys.zombie) do hideEntry(espPool[key]) end
         end
     end)
-
-    Window.AddSection(catESP, "Toggles")
-
-    Window.AddToggle(catESP, "Box", cfg.Zombie.ShowBox, function(state)
-        cfg.Zombie.ShowBox = state
+    S:Spacing()
+    S:Toggle("ZombieBox", "Box", zc.ShowBox, function(state)
+        zc.ShowBox = state
         if not state then
             for _, e in pairs(espPool) do if e.box then e.box.Visible = false end end
         end
     end)
-
-    Window.AddToggle(catESP, "Direction Line", cfg.Zombie.ShowLine, function(state)
-        cfg.Zombie.ShowLine = state
+    S:Toggle("ZombieLine", "Direction Line", zc.ShowLine, function(state)
+        zc.ShowLine = state
         if not state then
             for _, e in pairs(espPool) do if e.line then e.line.Visible = false end end
         end
     end)
-
-    Window.AddToggle(catESP, "Name & Distance", cfg.Zombie.ShowName, function(state)
-        cfg.Zombie.ShowName = state
+    S:Toggle("ZombieName", "Name & Distance", zc.ShowName, function(state)
+        zc.ShowName = state
         if not state then
             for _, e in pairs(espPool) do if e.label then e.label.Visible = false end end
         end
     end)
-
-    Window.AddToggle(catESP, "Health", cfg.Zombie.ShowHealth, function(state)
-        cfg.Zombie.ShowHealth = state
+    S:Toggle("ZombieHealth", "Health", zc.ShowHealth, function(state)
+        zc.ShowHealth = state
         if not state then
             for _, e in pairs(espPool) do if e.healthLabel then e.healthLabel.Visible = false end end
         end
     end)
+end
 
-    Window.AddSection(catESP, "Colors")
-
-    Window.AddColorPicker(catESP, "Box Color", cfg.Zombie.BoxColor, function(c)
-        cfg.Zombie.BoxColor = c
+local function BuildZombieColors(Tab)
+    local zc = cfg.Zombie
+    local S = Tab:Section("Zombie Colors", "Left")
+    S:Text("Box Color")
+    S:ColorPicker("ZBoxColor", zc.BoxColor.R, zc.BoxColor.G, zc.BoxColor.B, 1, function(c)
+        zc.BoxColor = c
         syncZombieColors()
     end)
-
-    Window.AddColorPicker(catESP, "Line Color", cfg.Zombie.LineColor, function(c)
-        cfg.Zombie.LineColor = c
+    S:Spacing()
+    S:Text("Line Color")
+    S:ColorPicker("ZLineColor", zc.LineColor.R, zc.LineColor.G, zc.LineColor.B, 1, function(c)
+        zc.LineColor = c
         syncZombieColors()
     end)
-
-    Window.AddColorPicker(catESP, "Text Color", cfg.Zombie.TextColor, function(c)
-        cfg.Zombie.TextColor = c
+    S:Spacing()
+    S:Text("Text Color")
+    S:ColorPicker("ZTextColor", zc.TextColor.R, zc.TextColor.G, zc.TextColor.B, 1, function(c)
+        zc.TextColor = c
         syncZombieColors()
     end)
 end
 
-local function buildHitboxTab()
-    Window.AddSection(catHitbox, "Head Hitbox Expander")
+local function BuildMysteryBox(Tab)
+    local mc = cfg.MysteryBox
+    local S = Tab:Section("Mystery Box ESP", "Right")
+    S:Toggle("MysteryBoxESP", "Mystery Box ESP", cfg.MysteryBoxESP.Visible, function(state)
+        cfg.MysteryBoxESP.Visible = state
+        notify(state and "Mystery Box ESP ON" or "Mystery Box ESP OFF", "", 2)
+        if state then
+            scanMysteryBoxes()
+        else
+            for key in pairs(activeKeys.mysteryBox) do hideEntry(espPool[key]) end
+        end
+    end)
+    S:Spacing()
+    S:Toggle("MBBox", "Box", mc.ShowBox, function(state) mc.ShowBox = state end)
+    S:Toggle("MBLine", "Direction Line", mc.ShowLine, function(state) mc.ShowLine = state end)
+    S:Toggle("MBName", "Name & Distance", mc.ShowName, function(state) mc.ShowName = state end)
+end
 
-    Window.AddToggle(catHitbox, "Hitbox Expander", cfg.HitboxExpander.Enabled, function(state)
+local function BuildMysteryBoxColors(Tab)
+    local mc = cfg.MysteryBox
+    local S = Tab:Section("Mystery Box Colors", "Right")
+    S:Text("Box Color")
+    S:ColorPicker("MBBoxColor", mc.BoxColor.R, mc.BoxColor.G, mc.BoxColor.B, 1, function(c)
+        mc.BoxColor = c
+    end)
+    S:Spacing()
+    S:Text("Line Color")
+    S:ColorPicker("MBLineColor", mc.LineColor.R, mc.LineColor.G, mc.LineColor.B, 1, function(c)
+        mc.LineColor = c
+    end)
+    S:Spacing()
+    S:Text("Text Color")
+    S:ColorPicker("MBTextColor", mc.TextColor.R, mc.TextColor.G, mc.TextColor.B, 1, function(c)
+        mc.TextColor = c
+    end)
+end
+
+local function BuildWallBuyESP(Tab)
+    local wc = cfg.WallBuy
+    local S = Tab:Section("Wall Buy ESP", "Left")
+    S:Toggle("WallBuyESP", "Wall Buy ESP", cfg.WallBuyESP.Visible, function(state)
+        cfg.WallBuyESP.Visible = state
+        notify(state and "Wall Buy ESP ON" or "Wall Buy ESP OFF", "", 2)
+        if state then
+            scanWallBuys()
+        else
+            for key in pairs(activeKeys.wallBuy) do hideEntry(espPool[key]) end
+            activeKeys.wallBuy = {}
+        end
+    end)
+    S:Spacing()
+    S:Text("Box Color")
+    S:ColorPicker("WBBoxColor", wc.BoxColor.R, wc.BoxColor.G, wc.BoxColor.B, 1, function(c)
+        wc.BoxColor = c
+    end)
+    S:Spacing()
+    S:Text("Text Color")
+    S:ColorPicker("WBTextColor", wc.TextColor.R, wc.TextColor.G, wc.TextColor.B, 1, function(c)
+        wc.TextColor = c
+    end)
+end
+
+local function BuildPerkESP(Tab)
+    local pc = cfg.Perk
+    local S = Tab:Section("Perk Machine ESP", "Right")
+    S:Toggle("PerkESP", "Perk Machine ESP", cfg.PerkESP.Visible, function(state)
+        cfg.PerkESP.Visible = state
+        notify(state and "Perk ESP ON" or "Perk ESP OFF", "", 2)
+        if state then
+            scanPerkMachines()
+        else
+            for key in pairs(activeKeys.perk) do hideEntry(espPool[key]) end
+            activeKeys.perk = {}
+        end
+    end)
+    S:Spacing()
+    S:Text("Box Color")
+    S:ColorPicker("PKBoxColor", pc.BoxColor.R, pc.BoxColor.G, pc.BoxColor.B, 1, function(c)
+        pc.BoxColor = c
+    end)
+    S:Spacing()
+    S:Text("Text Color")
+    S:ColorPicker("PKTextColor", pc.TextColor.R, pc.TextColor.G, pc.TextColor.B, 1, function(c)
+        pc.TextColor = c
+    end)
+end
+
+local function BuildHitbox(Tab)
+    local S = Tab:Section("Hitbox Expander", "Left")
+    S:Toggle("HitboxExpander", "Hitbox Expander", cfg.HitboxExpander.Enabled, function(state)
         cfg.HitboxExpander.Enabled = state
         if state then
             applyAllHitboxes()
-            UiLib.Notify("Hitbox ON", string.format("Head size: %.0f", cfg.HitboxExpander.Size), 2)
+            notify("Hitbox ON", string.format("Head size: %.0f", cfg.HitboxExpander.Size), 2)
         else
             restoreAllHitboxes()
-            UiLib.Notify("Hitbox OFF", "Original sizes restored", 2)
+            notify("Hitbox OFF", "Original sizes restored", 2)
         end
     end)
-
-    Window.AddSection(catHitbox, "Size")
-
-    Window.AddSlider(catHitbox, "Head Size (studs)", 2, 50, cfg.HitboxExpander.Size, function(v)
+    S:Spacing()
+    S:SliderInt("HitboxSize", "Head Size (studs)", 2, 6, cfg.HitboxExpander.Size, function(v)
         cfg.HitboxExpander.Size = v
         if cfg.HitboxExpander.Enabled then
             restoreAllHitboxes()
             applyAllHitboxes()
         end
     end)
-
-    Window.AddSection(catHitbox, "Info")
-    Window.AddSection(catHitbox, "Expands zombie head hitbox only.")
-    Window.AddSection(catHitbox, "Sizes restore on toggle OFF or rescan.")
+    S:Spacing()
+    S:Toggle("NoCollide", "No Zombie Collision", cfg.NoCollide.Enabled, function(state)
+        cfg.NoCollide.Enabled = state
+        if state then
+            applyZombieNoCollide()
+            notify("No Collision ON", "Zombies won't push you", 3)
+        else
+            restoreZombieCollide()
+            notify("No Collision OFF", "Zombie collision restored", 2)
+        end
+    end)
+    S:Spacing()
+    S:Tip("No Collision prevents zombies from pushing you out of corners.")
 end
 
-local function buildDebugTab()
-    Window.AddSection(catDebug, "Scan")
-
-    Window.AddButton(catDebug, "Rescan Zombies", function()
+local function BuildDebug(Tab)
+    local S = Tab:Section("Debug", "Right")
+    S:Button("Rescan Zombies", function()
         local before = 0
         for _ in pairs(zombieData) do before = before + 1 end
         scanZombies()
+        scanMysteryBoxes()
         local after = 0
         for _ in pairs(zombieData) do after = after + 1 end
         printl(string.format("[ZombieESP] Rescan: %d -> %d", before, after))
-        UiLib.Notify(string.format("Rescanned: %d zombie(s)", after), "", 3)
+        notify(string.format("Rescanned: %d zombie(s)", after), "", 3)
     end)
-
-    Window.AddButton(catDebug, "List Active Zombies", function()
+    S:Spacing()
+    S:Button("List Active Zombies", function()
         local count = 0
         local char  = LocalPlayer.Character
         local hrp   = char and char:FindFirstChild("HumanoidRootPart")
@@ -471,62 +898,64 @@ local function buildDebugTab()
             end
         end
         printl("[ZombieESP] Total tracked: " .. count)
-        UiLib.Notify(count .. " zombie(s) tracked", "Check console", 3)
+        notify(count .. " zombie(s) tracked", "Check console", 3)
     end)
-
-    Window.AddSection(catDebug, "Hitbox")
-
-    Window.AddButton(catDebug, "Restore All Hitboxes", function()
+    S:Spacing()
+    S:Button("Restore All Hitboxes", function()
         restoreAllHitboxes()
-        UiLib.Notify("Hitboxes Restored", "All head sizes reset", 2)
+        notify("Hitboxes Restored", "All head sizes reset", 2)
     end)
-
-    Window.AddButton(catDebug, "List Hitbox Store", function()
+    S:Spacing()
+    S:Button("List Hitbox Store", function()
         local count = 0
         for part, orig in pairs(hitboxStore) do
             printl(string.format("  [HB] %s -> orig: %.1f %.1f %.1f | cur: %.1f",
-                part.Name, orig.X, orig.Y, orig.Z, part.Size.X))
+                part.Name, orig.size.X, orig.size.Y, orig.size.Z, part.Size.X))
             count = count + 1
         end
         printl("[HB] Total expanded: " .. count)
-        UiLib.Notify(count .. " head(s) expanded", "", 2)
+        notify(count .. " head(s) expanded", "", 2)
     end)
 end
 
-buildESPTab()
-buildHitboxTab()
-buildDebugTab()
-
-Window.AddConfigPreset({})
+UI.AddTab("Zombie Tracker", function(tab)
+    BuildESP(tab)
+    BuildZombieColors(tab)
+    BuildMysteryBox(tab)
+    BuildMysteryBoxColors(tab)
+    BuildWallBuyESP(tab)
+    BuildPerkESP(tab)
+    BuildHitbox(tab)
+    BuildDebug(tab)
+end)
 
 printl("[Zombie Tracker] Loaded")
 
-RunService.Heartbeat:Connect(function()
+RunService.RenderStepped:Connect(function()
     if not isrbxactive() then return end
-    frameCount = frameCount + 1
-    if frameCount % 4 ~= 0 then return end
-
+    updateViewportCache()
     local char = LocalPlayer.Character
     local hrp  = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-
     pcall(updateZombieEsp, hrp.Position)
+    pcall(updateMysteryBoxEsp, hrp.Position)
+    pcall(updateWallBuyEsp, hrp.Position)
+    pcall(updatePerkEsp, hrp.Position)
 end)
 
 task.spawn(function()
-    local scanFrame = 0
     while true do
-        pcall(function()
-            if isrbxactive() then
-                scanFrame = scanFrame + 1
-                if scanFrame % 30 == 0 then
-                    scanZombies()
-                end
+        if isrbxactive() then
+            pcall(scanZombies)
+            pcall(scanMysteryBoxes)
+            pcall(scanWallBuys)
+            pcall(scanPerkMachines)
+            if cfg.NoCollide.Enabled then
+                pcall(applyZombieNoCollide)
             end
-        end)
-        task.wait(1 / 60)
+        end
+        task.wait(0.5)
     end
 end)
 
-UiLib.Notify("Zombie Tracker", "Loaded successfully", 4)
-UiLib.Run()
+notify("Zombie Tracker", "Loaded successfully", 4)
