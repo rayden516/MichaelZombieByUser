@@ -40,15 +40,21 @@ local hitboxStore    = {}
 local noCollideStore = {}
 local _afCycleList   = {}
 local _afCycleIdx    = 0
+
 local _afClickLast   = 0
 local _afTarget      = nil
 local _afStickTime   = 0
+local _afHeightVec   = Vector3.new(0, cfg.AutoFarm.HeightOffset, 0)
+local _afHrp         = nil
+local _afSelfHum     = nil
 
 local hasWorldToScreen    = type(WorldToScreen) == "function"
 local cachedCam           = workspace.CurrentCamera
 local cachedScreenCenterX = 960
 local cachedScreenCenterY = 540
 local cachedScreenBottomY = 1080
+local lineFrom             = Vector2.new(960, 1080)
+local AIM_OFFSET           = Vector3.new(0, 0.5, 0)
 
 local function updateViewportCache()
     cachedCam = workspace.CurrentCamera
@@ -56,19 +62,28 @@ local function updateViewportCache()
     cachedScreenCenterX = vs.X / 2
     cachedScreenCenterY = vs.Y / 2
     cachedScreenBottomY = vs.Y
+    lineFrom            = Vector2.new(cachedScreenCenterX, cachedScreenBottomY)
 end
 
 updateViewportCache()
 
+local function refreshAfChar()
+    local char = LocalPlayer.Character
+    _afHrp     = char and char:FindFirstChild("HumanoidRootPart")
+    _afSelfHum = char and char:FindFirstChildWhichIsA("Humanoid")
+end
+
+refreshAfChar()
+
 local function toScreen(pos)
     if not pos then return nil, false end
     if hasWorldToScreen then
-        local ok, scr, on = pcall(WorldToScreen, pos)
-        if ok and scr then return scr, on end
+        local scr, on = WorldToScreen(pos)
+        if scr then return scr, on end
     end
     if cachedCam then
-        local ok, v, vis = pcall(cachedCam.WorldToViewportPoint, cachedCam, pos)
-        if ok and v then return Vector2.new(v.X, v.Y), vis end
+        local v, vis = cachedCam:WorldToViewportPoint(pos)
+        return Vector2.new(v.X, v.Y), vis
     end
     return nil, false
 end
@@ -125,12 +140,10 @@ local function removeEntry(key)
     local entry = espPool[key]
     if not entry then return end
     hideEntry(entry)
-    pcall(function()
-        if entry.corners     then for _, l in ipairs(entry.corners) do l:Remove() end end
-        if entry.label       then entry.label:Remove()       end
-        if entry.healthLabel then entry.healthLabel:Remove() end
-        if entry.line        then entry.line:Remove()        end
-    end)
+    if entry.corners     then for _, l in ipairs(entry.corners) do l:Remove() end end
+    if entry.label       then entry.label:Remove()       end
+    if entry.healthLabel then entry.healthLabel:Remove() end
+    if entry.line        then entry.line:Remove()        end
     espPool[key] = nil
 end
 
@@ -166,20 +179,16 @@ local function applyHitbox(model)
     if not model or not model.Parent then return end
     local head = getHeadPart(model)
     if not head or not head.Parent or hitboxStore[head] then return end
-    local ok,  origSize         = pcall(function() return head.Size end)
-    if not ok then return end
-    local ok2, origCollide      = pcall(function() return head.CanCollide end)
-    local ok3, origTransparency = pcall(function() return head.Transparency end)
     hitboxStore[head] = {
-        size         = origSize,
-        collide      = ok2 and origCollide or true,
-        transparency = ok3 and origTransparency or 0,
+        size         = head.Size,
+        collide      = head.CanCollide,
+        transparency = head.Transparency,
     }
     local s = cfg.HitboxExpander.Size
-    pcall(function() head.Size       = Vector3.new(s, s, s) end)
-    pcall(function() head.CanCollide = false end)
+    head.Size       = Vector3.new(s, s, s)
+    head.CanCollide = false
     if not cfg.HitboxExpander.KeepVisible then
-        pcall(function() head.Transparency = 1 end)
+        head.Transparency = 1
     end
 end
 
@@ -187,7 +196,7 @@ local function resizeAllHitboxes()
     local s = cfg.HitboxExpander.Size
     for part in pairs(hitboxStore) do
         if part and part.Parent then
-            pcall(function() part.Size = Vector3.new(s, s, s) end)
+            part.Size = Vector3.new(s, s, s)
         end
     end
 end
@@ -195,9 +204,7 @@ end
 local function setHitboxVisibility(keepVisible)
     for part, orig in pairs(hitboxStore) do
         if part and part.Parent then
-            pcall(function()
-                part.Transparency = keepVisible and orig.transparency or 1
-            end)
+            part.Transparency = keepVisible and orig.transparency or 1
         end
     end
 end
@@ -205,9 +212,9 @@ end
 local function restoreAllHitboxes()
     for part, orig in pairs(hitboxStore) do
         if part and part.Parent then
-            pcall(function() part.Size         = orig.size         end)
-            pcall(function() part.CanCollide   = orig.collide      end)
-            pcall(function() part.Transparency = orig.transparency end)
+            part.Size         = orig.size
+            part.CanCollide   = orig.collide
+            part.Transparency = orig.transparency
         end
     end
     hitboxStore = {}
@@ -231,11 +238,9 @@ local function applyNoCollideToRoot(root)
     local char = LocalPlayer.Character
     local hrp  = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
-    pcall(function()
-        local c = Instance.new("NoCollisionConstraint")
-        c.Part0 = hrp; c.Part1 = root; c.Parent = hrp
-        noCollideStore[root] = c
-    end)
+    local c = Instance.new("NoCollisionConstraint")
+    c.Part0 = hrp; c.Part1 = root; c.Parent = hrp
+    noCollideStore[root] = c
 end
 
 local function applyZombieNoCollide()
@@ -243,14 +248,14 @@ local function applyZombieNoCollide()
 end
 
 local function restoreZombieCollide()
-    for _, c in pairs(noCollideStore) do pcall(function() c:Destroy() end) end
+    for _, c in pairs(noCollideStore) do c:Destroy() end
     noCollideStore = {}
 end
 
 local function cleanNoCollideStore()
     for root, c in pairs(noCollideStore) do
         if not root or not root.Parent or not c or not c.Parent then
-            pcall(function() if c and c.Parent then c:Destroy() end end)
+            if c and c.Parent then c:Destroy() end
             noCollideStore[root] = nil
         end
     end
@@ -354,8 +359,7 @@ local function updateZombieEsp(playerPos)
                     local maxHp = hum and hum.MaxHealth or 100
                     if zc.ShowBox then
                         if not data.sizeCache then
-                            local ok, sz    = pcall(function() return root.Size end)
-                            data.sizeCache  = ok and sz or Vector3.new(4, 5, 4)
+                            data.sizeCache = root.Size
                         end
                         local scale = math.clamp(1000 / math.max(dist, 1), 0.3, 8)
                         local boxH  = math.max(math.floor(data.sizeCache.Y * 11 * scale / 10), 20)
@@ -391,7 +395,7 @@ local function updateZombieEsp(playerPos)
                         entry.healthLabel.Visible = false
                     end
                     if zc.ShowLine then
-                        entry.line.From    = Vector2.new(cachedScreenCenterX, cachedScreenBottomY)
+                        entry.line.From    = lineFrom
                         entry.line.To      = Vector2.new(scrX, scrY)
                         entry.line.Color   = zc.LineColor
                         entry.line.Visible = true
@@ -486,7 +490,7 @@ local function updateMysteryBoxEsp(playerPos)
                     end
                     entry.healthLabel.Visible = false
                     if mc.ShowLine then
-                        entry.line.From    = Vector2.new(cachedScreenCenterX, cachedScreenBottomY)
+                        entry.line.From    = lineFrom
                         entry.line.To      = Vector2.new(scrX, scrY)
                         entry.line.Color   = mc.LineColor
                         entry.line.Visible = true
@@ -543,6 +547,8 @@ local simpleEspDefs = {
         boxW = 20, boxH = 20, showLine = true,
     },
 }
+
+local simpleEspKeys = {"wallBuy", "perk", "trickOrTreat", "pumpkin"}
 
 local function scanSimpleEsp(defKey)
     local def    = simpleEspDefs[defKey]
@@ -614,7 +620,7 @@ local function updateSimpleEsp(defKey, playerPos)
                 entry.label.Visible     = true
                 entry.healthLabel.Visible = false
                 if def.showLine then
-                    entry.line.From    = Vector2.new(cachedScreenCenterX, cachedScreenBottomY)
+                    entry.line.From    = lineFrom
                     entry.line.To      = Vector2.new(scrX, scrY)
                     entry.line.Color   = cc.LineColor
                     entry.line.Visible = true
@@ -651,20 +657,17 @@ local function bringZombies()
         local data    = entry.data
         local angle   = (i - 1) * step
         local zombieY = data.root.Position.Y
-        pcall(function()
-            data.hum:MoveTo(Vector3.new(
-                playerPos.X + math.cos(angle) * radius,
-                zombieY,
-                playerPos.Z + math.sin(angle) * radius
-            ))
-        end)
+        data.hum:MoveTo(Vector3.new(
+            playerPos.X + math.cos(angle) * radius,
+            zombieY,
+            playerPos.Z + math.sin(angle) * radius
+        ))
     end
 end
 
 local function getAutoFarmTarget()
-    local char = LocalPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
+    if not _afHrp then return nil end
+    local hrp  = _afHrp
     local mode = cfg.AutoFarm.Mode
     if mode == "cycle" then
         if #_afCycleList == 0 then
@@ -815,7 +818,7 @@ local function BuildAutoFarm(Tab)
     S:Toggle("AFFace",  "Face Target (HRP)",   cfg.AutoFarm.FaceTarget,  function(state) cfg.AutoFarm.FaceTarget  = state end)
     S:Toggle("AFAim",   "Aim Camera (bullets)", cfg.AutoFarm.AimCamera,  function(state) cfg.AutoFarm.AimCamera   = state end)
     S:Spacing()
-    S:SliderInt("AFHeight",    "Height Above Zombie",    3,    20,  cfg.AutoFarm.HeightOffset,     function(v) cfg.AutoFarm.HeightOffset     = v end)
+    S:SliderInt("AFHeight",    "Height Above Zombie",    3,    20,  cfg.AutoFarm.HeightOffset,     function(v) cfg.AutoFarm.HeightOffset = v; _afHeightVec = Vector3.new(0, v, 0) end)
     S:SliderFloat("AFClick2",  "Click Interval (s)",     0.05, 1.0, cfg.AutoFarm.ClickInterval,   "%.2f", function(v) cfg.AutoFarm.ClickInterval    = v end)
     S:SliderFloat("AFRetarget", "Retarget Interval (s)", 0.3,  5.0, cfg.AutoFarm.RetargetInterval, "%.1f", function(v) cfg.AutoFarm.RetargetInterval = v end)
     S:Spacing()
@@ -897,20 +900,20 @@ RunService.RenderStepped:Connect(function()
     local hrp  = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
     local pos = hrp.Position
-    pcall(updateZombieEsp, pos)
-    pcall(updateMysteryBoxEsp, pos)
-    for defKey in pairs(simpleEspDefs) do pcall(updateSimpleEsp, defKey, pos) end
+    updateZombieEsp(pos)
+    updateMysteryBoxEsp(pos)
+    for _, defKey in ipairs(simpleEspKeys) do updateSimpleEsp(defKey, pos) end
 end)
 
 task.spawn(function()
     while true do
         if isrbxactive() then
-            pcall(scanZombies)
-            pcall(scanMysteryBoxes)
-            for defKey in pairs(simpleEspDefs) do pcall(scanSimpleEsp, defKey) end
-            pcall(cleanNoCollideStore)
-            if cfg.NoCollide.Enabled    then pcall(applyZombieNoCollide) end
-            if cfg.BringZombies.Enabled then pcall(bringZombies)         end
+            scanZombies()
+            scanMysteryBoxes()
+            for _, defKey in ipairs(simpleEspKeys) do scanSimpleEsp(defKey) end
+            cleanNoCollideStore()
+            if cfg.NoCollide.Enabled    then applyZombieNoCollide() end
+            if cfg.BringZombies.Enabled then bringZombies()         end
         end
         task.wait(0.5)
     end
@@ -921,14 +924,15 @@ RunService.Heartbeat:Connect(function()
         if cfg.AutoFarm.Enabled then _afTarget = nil end
         return
     end
-
-    if not cfg.AutoFarm.Enabled then _afTarget = nil; return end
+    local af = cfg.AutoFarm
+    if not af.Enabled then _afTarget = nil; return end
 
     if _afTarget and not isZombieAlive(_afTarget) then
         _afTarget = nil; _afStickTime = 0
     end
 
-    if not _afTarget or (os.clock() - _afStickTime > cfg.AutoFarm.RetargetInterval) then
+    if not _afTarget or (os.clock() - _afStickTime > af.RetargetInterval) then
+        if not _afHrp or not _afHrp.Parent then refreshAfChar() end
         _afTarget    = getAutoFarmTarget()
         _afStickTime = os.clock()
         if not _afTarget then return end
@@ -937,37 +941,30 @@ RunService.Heartbeat:Connect(function()
     local root = _afTarget.root
     if not root or not root.Parent then _afTarget = nil; return end
 
-    local char    = LocalPlayer.Character
-    local hrp     = char and char:FindFirstChild("HumanoidRootPart")
-    local selfHum = char and char:FindFirstChildWhichIsA("Humanoid")
+    if not _afHrp or not _afHrp.Parent then refreshAfChar() end
+    local hrp     = _afHrp
+    local selfHum = _afSelfHum
     if not hrp or not selfHum or selfHum.Health <= 0 then return end
 
     local zombiePos = root.Position
-    local newPos    = zombiePos + Vector3.new(0, cfg.AutoFarm.HeightOffset, 0)
+    local newPos    = zombiePos + _afHeightVec
 
-    pcall(function()
-        if cfg.AutoFarm.FaceTarget then
-            hrp.CFrame = CFrame.lookAt(newPos, zombiePos)
-        else
-            hrp.CFrame = CFrame.new(newPos)
-        end
-    end)
-
-    if cfg.AutoFarm.AimCamera then
-        pcall(function()
-            local cam = workspace.CurrentCamera
-            if cam then
-                cam.CFrame = CFrame.lookAt(newPos + Vector3.new(0, 0.5, 0), zombiePos)
-            end
-        end)
-        pcall(mousemoveabs, cachedScreenCenterX, cachedScreenCenterY)
+    if af.FaceTarget then
+        hrp.CFrame = CFrame.lookAt(newPos, zombiePos)
+    else
+        hrp.CFrame = CFrame.new(newPos)
     end
 
-    if cfg.AutoFarm.ClickAttack then
+    if af.AimCamera then
+        cachedCam:lookAt(newPos + AIM_OFFSET, zombiePos)
+        mousemoveabs(cachedScreenCenterX, cachedScreenCenterY)
+    end
+
+    if af.ClickAttack then
         local now = os.clock()
-        if now - _afClickLast >= cfg.AutoFarm.ClickInterval then
+        if now - _afClickLast >= af.ClickInterval then
             _afClickLast = now
-            pcall(mouse1click)
+            mouse1click()
         end
     end
 end)
